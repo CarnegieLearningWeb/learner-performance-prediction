@@ -21,13 +21,14 @@ class Logger:
         for k, v in dic.items():
             self.writer.add_histogram(k, v, step)
 
-    def log_scalars(self, dic, step):
+    def log_scalars(self, dic, step, epoch=0,total_steps=0):
         """Log dictionary of scalar values. """
-        for k, v in dic.items():
-            self.writer.add_scalar(k, v, step)
+        # for k, v in dic.items():
+            # self.writer.add_scalar(k, v, step, epoch)
 
         if self.verbose:
-            print(f"Step {step}, {dic}")
+            print(f"Epoch {epoch}, Step {step}/{total_steps}, {dic}")
+            pass
 
     def close(self):
         self.writer.close()

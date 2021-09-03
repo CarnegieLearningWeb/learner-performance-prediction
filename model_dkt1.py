@@ -28,6 +28,8 @@ class DKT1(nn.Module):
         self.skill_out = skill_out
         self.input_size = (2 * num_items + 1) * item_in + (2 * num_skills + 1) * skill_in
         self.output_size = num_items * item_out + num_skills * skill_out
+        self.num_hid_layers = num_hid_layers
+        self.hid_size = hid_size
         
         self.lstm = nn.LSTM(self.input_size, hid_size, num_hid_layers, batch_first=True)
         self.dropout = nn.Dropout(p=drop_prob)
@@ -50,3 +52,8 @@ class DKT1(nn.Module):
     def repackage_hidden(self, hidden):
         # Return detached hidden for TBPTT
         return tuple((v.detach() for v in hidden))
+
+    def init_hidden(self, bsz):
+        weight = next(self.parameters())
+        return (weight.new_zeros(self.num_hid_layers, bsz, self.hid_size),
+                    weight.new_zeros(self.num_hid_layers, bsz, self.hid_size))

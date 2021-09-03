@@ -9,6 +9,7 @@ from torch.nn.utils.rnn import pad_sequence
 
 from model_dkt1 import DKT1
 from utils import *
+import gc
 
 
 def cuda(tensor):
@@ -33,6 +34,16 @@ def get_data(df, item_in, skill_in, item_out, skill_out, skill_separate, train_s
                  for _, u_df in df.groupby(idx)]
     labels = [torch.tensor(u_df["correct"].values, dtype=torch.long)
               for _, u_df in df.groupby(idx)]
+    # print("length of skill_ids", len(skill_ids))
+    # def fun(t):
+    #     print(t.shape)
+    #     return list(t.shape)[0] < 600 
+    lengths = [item_id.shape[0] for item_id in item_ids]
+    print("max sequence length",max(lengths))
+    item_ids = list(filter(lambda x: list(x.shape)[0] < 4000, item_ids))
+    skill_ids = list(filter(lambda x: list(x.shape)[0] < 4000, skill_ids))
+    labels = list(filter(lambda x: list(x.shape)[0] < 4000, labels))
+    # print(item_ids)
 
     item_inputs = [torch.cat((torch.zeros(1, dtype=torch.long), i * 2 + l + 1))[:-1]
                    for (i, l) in zip(item_ids, labels)]
@@ -127,19 +138,21 @@ def train(train_data, val_data, model, optimizer, logger, saver, num_epochs, bat
     """
     criterion = nn.BCEWithLogitsLoss()
     metrics = Metrics()
-    step = 0
+    
     
     for epoch in range(num_epochs):
+        step = 0
         train_batches = prepare_batches(train_data, batch_size)
         val_batches = prepare_batches(val_data, batch_size)
-
+        total_loss = 0
+        hidden = model.init_hidden(batch_size)
         # Training
         for item_inputs, skill_inputs, item_ids, skill_ids, labels in train_batches:
             length = labels.size(1)
             preds = torch.empty(labels.size(0), length, model.output_size)
-            preds = preds.cuda()
-            item_inputs = cuda(item_inputs)
-            skill_inputs = cuda(skill_inputs)
+            if args.use_gpu and torch.cuda.is_available(): preds = preds.cuda()
+            if args.use_gpu and torch.cuda.is_available():item_inputs = cuda(item_inputs)
+            if args.use_gpu and torch.cuda.is_available():skill_inputs = cuda(skill_inputs)
 
             # Truncated backprop through time
             for i in range(0, length, bptt):
@@ -151,7 +164,9 @@ def train(train_data, val_data, model, optimizer, logger, saver, num_epochs, bat
                     hidden = model.repackage_hidden(hidden)
                     pred, hidden = model(item_inp, skill_inp, hidden)
                 preds[:, i:i + bptt] = pred
-
+            
+            # preds, hidden = model(item_inputs, skill_inputs, hidden)
+            # if args.use_gpu and torch.cuda.is_available(): labels=labels.cuda()
             loss = compute_loss(preds, item_ids, skill_ids, labels.cuda(), criterion)
             train_auc = compute_auc(torch.sigmoid(preds).detach().cpu(), item_ids, skill_ids, labels)
 
@@ -161,22 +176,24 @@ def train(train_data, val_data, model, optimizer, logger, saver, num_epochs, bat
             step += 1
             metrics.store({'loss/train': loss.item()})
             metrics.store({'auc/train': train_auc})
+            total_loss += loss.item()
 
             # Logging
             if step % 20 == 0:
-                logger.log_scalars(metrics.average(), step)
+                # logger.log_scalars(total_loss, step,epoch=epoch, total_steps=len(train_batches))
                 #weights = {"weight/" + name: param for name, param in model.named_parameters()}
                 #grads = {"grad/" + name: param.grad
                 #         for name, param in model.named_parameters() if param.grad is not None}
                 #logger.log_histograms(weights, step)
                 #logger.log_histograms(grads, step)
+                pass
 
         # Validation
         model.eval()
         for item_inputs, skill_inputs, item_ids, skill_ids, labels in val_batches:
             with torch.no_grad():
-                item_inputs = cuda(item_inputs)
-                skill_inputs = cuda(skill_inputs)
+                if args.use_gpu and torch.cuda.is_available():item_inputs = cuda(item_inputs)
+                if args.use_gpu and torch.cuda.is_available():skill_inputs = cuda(skill_inputs)
                 preds, _ = model(item_inputs, skill_inputs)
             val_auc = compute_auc(torch.sigmoid(preds).cpu(), item_ids, skill_ids, labels)
             metrics.store({'auc/val': val_auc})
@@ -211,6 +228,7 @@ if __name__ == "__main__":
     parser.add_argument('--batch_size', type=int, default=100)
     parser.add_argument('--lr', type=float, default=1e-2)
     parser.add_argument('--num_epochs', type=int, default=300)
+    parser.add_argument('--use_gpu', action="store_true")
     args = parser.parse_args()
 
     assert (args.item_in or args.skill_in)    # Use at least one of skills or items as input
@@ -227,27 +245,31 @@ if __name__ == "__main__":
     num_skills = int(full_df["skill_id"].max() + 1) + 1
 
     model = DKT1(num_items, num_skills, args.hid_size, args.num_hid_layers, args.drop_prob,
-                 args.item_in, args.skill_in, args.item_out, args.skill_out).cuda()
+                 args.item_in, args.skill_in, args.item_out, args.skill_out)
+    if args.use_gpu and torch.cuda.is_available(): model.cuda()
     optimizer = Adam(model.parameters(), lr=args.lr)
 
     # Reduce batch size until it fits on GPU
     while True:
-        try:
+        # try:
             # Train
-            param_str = (f'{args.dataset},'
-                         f'batch_size={args.batch_size},'
-                         f'item_in={args.item_in},'
-                         f'skill_in={args.skill_in},'
-                         f'item_out={args.item_out},'
-                         f'skill_out={args.skill_out}'
-                         f'skill_separate={args.skill_separate}')
-            logger = Logger(os.path.join(args.logdir, param_str))
-            saver = Saver(args.savedir, param_str)
-            train(train_data, val_data, model, optimizer, logger, saver, args.num_epochs, args.batch_size)
-            break
-        except RuntimeError:
-            args.batch_size = args.batch_size // 2
-            print(f'Batch does not fit on gpu, reducing size to {args.batch_size}')
+        param_str = (f'{args.dataset},'
+                        f'batch_size={args.batch_size},'
+                        f'item_in={args.item_in},'
+                        f'skill_in={args.skill_in},'
+                        f'item_out={args.item_out},'
+                        f'skill_out={args.skill_out}'
+                        f'skill_separate={args.skill_separate}')
+        logger = Logger(os.path.join(args.logdir, param_str))
+        saver = Saver(args.savedir, param_str)
+        train(train_data, val_data, model, optimizer, logger, saver, args.num_epochs, args.batch_size)
+        break
+        # except RuntimeError as err:
+        #     print(err)
+        #     # args.batch_size = args.batch_size // 2
+        #     torch.cuda.empty_cache()
+        #     break
+        #     print(f'Batch does not fit on gpu, reducing size to {args.batch_size}')
 
     logger.close()
 
@@ -259,11 +281,12 @@ if __name__ == "__main__":
     test_preds = np.empty(0)
 
     # Predict on test set
+    print("test")
     model.eval()
     for item_inputs, skill_inputs, item_ids, skill_ids, labels in test_batches:
         with torch.no_grad():
-            item_inputs = cuda(item_inputs)
-            skill_inputs = cuda(skill_inputs)
+            if args.use_gpu and torch.cuda.is_available(): item_inputs = cuda(item_inputs)
+            if args.use_gpu and torch.cuda.is_available(): skill_inputs = cuda(skill_inputs)
             preds, _ = model(item_inputs, skill_inputs)
             preds = torch.sigmoid(get_preds(preds, item_ids, skill_ids, labels)).cpu().numpy()
             test_preds = np.concatenate([test_preds, preds])

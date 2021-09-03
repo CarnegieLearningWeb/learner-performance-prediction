@@ -27,15 +27,17 @@ class DKT2(nn.Module):
 
         self.lin1 = nn.Linear(hid_size + embed_size, hid_size)
         self.lin2 = nn.Linear(hid_size, 1)
+        self.hid_size = hid_size
+        self.num_hid_layers = num_hid_layers
 
-    def forward(self, item_inputs, skill_inputs, label_inputs, item_ids, skill_ids):
+    def forward(self, item_inputs, skill_inputs, label_inputs, item_ids, skill_ids, hidden):
         inputs = self.get_inputs(item_inputs, skill_inputs, label_inputs)
         query = self.get_query(item_ids, skill_ids)
 
-        x, _ = self.lstm(inputs)
+        x, hidden = self.lstm(inputs, hidden)
         x = self.lin1(torch.cat([self.dropout(x), query], dim=-1))
         x = self.lin2(torch.relu(self.dropout(x))).squeeze(-1)
-        return x
+        return x, hidden
 
     def get_inputs(self, item_inputs, skill_inputs, label_inputs):
         item_inputs = self.item_embeds(item_inputs)
@@ -52,3 +54,9 @@ class DKT2(nn.Module):
         skill_ids = self.skill_embeds(skill_ids)
         query = torch.cat([item_ids, skill_ids], dim=-1)
         return query
+
+    def init_hidden(self, bsz):
+        weight = next(self.parameters())
+        return (weight.new_zeros(self.num_hid_layers, bsz, self.hid_size),
+                    weight.new_zeros(self.num_hid_layers, bsz, self.hid_size))
+        
